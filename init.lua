@@ -3,7 +3,7 @@
 --  Horizontal “infinite desktop” panning activated while RIGHT mouse
 --  button is held down.
 --
--- curral credit: John Ankarström @ https://github.com/jocap/ScrollDesktop.spoon
+-- original credit: John Ankarström @ https://github.com/jocap/ScrollDesktop.spoon
 ---------------------------------------------------------------------------
 
 ---------------------------------------------------------------------------
@@ -25,9 +25,9 @@ end
 --  Local aliases for EventTap constants
 ---------------------------------------------------------------------------
 local scrollWheel <const> = hs.eventtap.event.types.scrollWheel
-
 local axis1 <const> = hs.eventtap.event.properties.scrollWheelEventPointDeltaAxis1 -- vertical
 local axis2 <const> = hs.eventtap.event.properties.scrollWheelEventPointDeltaAxis2 -- horizontal
+local checkKeyboardModifiers <const> = hs.eventtap.checkKeyboardModifiers
 
 
 ---------------------------------------------------------------------------
@@ -50,7 +50,6 @@ function ScrollDesktop:start(opt)
   -------------------------------------------------------------------------
   --  State
   -------------------------------------------------------------------------
-  self.gestureActive = false   -- true while we are consuming scroll events
   self.exemptWindow  = nil     -- window id to leave stationary   (⇧)
   self.onlyWindow    = nil     -- window object to move exclusively (⌥)
   self.onlyRightOf   = nil     -- x-coordinate column lock        (⌃)
@@ -58,6 +57,7 @@ function ScrollDesktop:start(opt)
   self.positions      = {}     -- virtual positions for off-screen windows
   self.xmax           = 0
 
+  local active = false   -- true while we are consuming scroll events
   -------------------------------------------------------------------------
   --  Event-tap
   -------------------------------------------------------------------------
@@ -68,33 +68,33 @@ function ScrollDesktop:start(opt)
     local dx = event:getProperty(axis2)
     if dx == 0 then
       -- reset if we were active but user switched to vertical scrolling
-      self.gestureActive = false
+      active = false
       return false
     end
 
     -----------------------------------------------------------------------
     --  Only act while the cmd key is depressed
     -----------------------------------------------------------------------
-    local mod = hs.eventtap.checkKeyboardModifiers()
+    local mod = checkKeyboardModifiers()
     if not mod.cmd then
-      self.gestureActive = false
+      active = false
       return false           -- let macOS / the app handle the scroll
     end
 
     -----------------------------------------------------------------------
     --  First horizontal event with RMB held → initialise gesture
     -----------------------------------------------------------------------
-    local beginEvent = not self.gestureActive
-    if beginEvent then
-      self.gestureActive = true
+    if not active then
+      active = true
 
       local dy     = event:getProperty(axis1)
       -- cheap filter: abort if vertical intent seems stronger
       if math.abs(dy) > math.abs(dx) then
-        self.gestureActive = false
+        active = false
         return false
       end
 
+      -- additional modifiers held
       if #mod > 1 then
         local window = get_window_under_mouse()
         -------------------------------------------------------------------

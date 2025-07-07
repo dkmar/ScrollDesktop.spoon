@@ -149,6 +149,14 @@ function ScrollDesktop:start(opt)
     return true -- swallow the event
 
   end):start()
+
+  -------------------------------------------------------------------------
+  --  Focus watcher – bring off-screen window into view
+  -------------------------------------------------------------------------
+  local wf = hs.window.filter.new{default={allowRoles={"AXStandardWindow"}}}
+  self.focusWatcher = wf:subscribe(hs.window.filter.windowFocused, function(w)
+    self:_scrollFocusedIntoView(w)
+  end)
 end
 
 
@@ -212,6 +220,43 @@ function ScrollDesktop:scrollWindows(dx)
   end
 end
 
+---------------------------------------------------------------------------
+--  INTERNAL: bring newly-focused window onto the visible screen band
+---------------------------------------------------------------------------
+function ScrollDesktop:_scrollFocusedIntoView(win)
+  if not win then return end
+
+  local screen = win:screen()
+  if not screen then return end
+
+  local winFrame = win:frame()
+  local screenFrame = screen:fullFrame()
+
+  local leftBound, rightBound = screenFrame.x, screenFrame.x + screenFrame.w
+  -- is ~fully out of bounds?
+  local fullyLeft  = winFrame.x + winFrame.w < leftBound  + 10
+  local fullyRight = winFrame.x > rightBound - 10
+
+  if not (fullyLeft or fullyRight) then return end  -- already visible
+
+  -- Desired x so that window is horizontally centred on the screen
+  local targetX = screenFrame.x + screenFrame.w/2 - winFrame.w/2
+  -- amount to move *right*
+  local dx = targetX - resolve_position(self.positions[win:id()], win:topLeft()).x
+
+  -- Re-use normal scrolling routine
+  self.exemptWindow   = nil
+  self.onlyWindow     = nil
+  self.onlyRightOf    = nil
+  self.currentWindows = hs.fnutils.filter(
+      hs.window.orderedWindows(),
+      function(w) return w:screen() == screen
+  end)
+
+  self:scrollWindows(dx)
+end
+
+
 
 ---------------------------------------------------------------------------
 --  Stop
@@ -220,6 +265,10 @@ function ScrollDesktop:stop()
   if self.tap then
     self.tap:stop()
     self.tap = nil
+  end
+  if self.focusWatcher then
+      self.focusWatcher:unsubscribeAll()
+      self.focusWatcher = nil
   end
 end
 

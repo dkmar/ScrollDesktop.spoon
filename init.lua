@@ -3,7 +3,7 @@
 --  Horizontal “infinite desktop” panning activated while RIGHT mouse
 --  button is held down.
 --
--- original credit: John Ankarström @ https://github.com/jocap/ScrollDesktop.spoon
+-- curral credit: John Ankarström @ https://github.com/jocap/ScrollDesktop.spoon
 ---------------------------------------------------------------------------
 
 ---------------------------------------------------------------------------
@@ -54,9 +54,9 @@ function ScrollDesktop:start(opt)
   self.exemptWindow  = nil     -- window id to leave stationary   (⇧)
   self.onlyWindow    = nil     -- window object to move exclusively (⌥)
   self.onlyRightOf   = nil     -- x-coordinate column lock        (⌃)
-  self.currentWindows = nil    -- cached window list for this gesture
+  self.currentWindows = {}    -- cached window list for this gesture
   self.positions      = {}     -- virtual positions for off-screen windows
-  self.xmax           = hs.screen.mainScreen():fullFrame().w
+  self.xmax           = 0
 
   -------------------------------------------------------------------------
   --  Event-tap
@@ -95,42 +95,50 @@ function ScrollDesktop:start(opt)
         return false
       end
 
-      local window = get_window_under_mouse()
+      if #mod > 1 then
+        local window = get_window_under_mouse()
+        -------------------------------------------------------------------
+        --  ⇧  Don’t move window under pointer
+        -------------------------------------------------------------------
+        if window and mod.shift then
+            self.exemptWindow = window:id()
+        else
+            self.exemptWindow = nil
+        end
 
-      -------------------------------------------------------------------
-      --  ⇧  Don’t move window under pointer
-      -------------------------------------------------------------------
-      if window and mod.shift then
-        self.exemptWindow = window:id()
-      else
-        self.exemptWindow = nil
+        -------------------------------------------------------------------
+        --  ⌥  Move only window under pointer (cursor “sticks” to it)
+        -------------------------------------------------------------------
+        if window and mod.alt then
+            window:focus()
+            self.onlyWindow    = window
+            self.currentWindows = { window }
+        else
+            self.onlyWindow     = nil
+        end
+
+        -------------------------------------------------------------------
+        --  ⌃  Only windows to the right of the pointer
+        -------------------------------------------------------------------
+        if mod.ctrl then
+            self.onlyRightOf = hs.mouse:getRelativePosition().x
+        else
+            self.onlyRightOf = nil
+        end
       end
 
-      -------------------------------------------------------------------
-      --  ⌥  Move only window under pointer (cursor “sticks” to it)
-      -------------------------------------------------------------------
-      if window and mod.alt then
-        window:focus()
-        self.onlyWindow    = window
-        self.currentWindows = { window }
-      else
-        self.onlyWindow     = nil
-      end
-
-      -------------------------------------------------------------------
-      --  ⌃  Only windows to the right of the pointer
-      -------------------------------------------------------------------
-      if mod.ctrl then
-        self.onlyRightOf = hs.mouse:getRelativePosition().x
-      else
-        self.onlyRightOf = nil
-      end
-
+      local gestureScreen = hs.mouse.getCurrentScreen()
+      local screenFrame = gestureScreen:fullFrame()
+      self.xmin, self.xmax = screenFrame.x, screenFrame.x + screenFrame.w
       -------------------------------------------------------------------
       --  If no ⌥ override, capture the full ordered window list
       -------------------------------------------------------------------
       if not self.onlyWindow then
-        self.currentWindows = hs.window.orderedWindows()
+        -- current screen only
+        self.currentWindows = hs.fnutils.filter(
+            hs.window.orderedWindows(),
+            function(w) return w:screen() == gestureScreen end
+        )
       end
     end
 
@@ -144,63 +152,62 @@ function ScrollDesktop:start(opt)
 end
 
 
+local function resolve_position(cachedPos, currPos)
+  -- if y differs, the cache is stale and the user has moved the window manually
+  if cachedPos == nil or cachedPos.y ~= currPos.y then
+    return currPos
+  else
+    return cachedPos
+  end
+end
+
 ---------------------------------------------------------------------------
 --  Move windows horizontally by dx
 ---------------------------------------------------------------------------
 function ScrollDesktop:scrollWindows(dx)
-  for _, window in ipairs(self.currentWindows or {}) do
+  for _, window in ipairs(self.currentWindows) do
     local id = window:id()
 
-    -- ⇧  exempt window
-    if id ~= self.exemptWindow then
+    -- Skip exempt window (⇧ modifier)
+    if id == self.exemptWindow then goto continue end
 
-      ---------------------------------------------------------------------
-      --  Determine the logical origin (real frame or virtual off-screen)
-      ---------------------------------------------------------------------
-      local origin = self.positions[id] or window:topLeft()
+    -- Get current logical position (virtual or real)
+    local curr = resolve_position(self.positions[id],window:topLeft())
+    local newX = curr.x + dx
 
-      ---------------------------------------------------------------------
-      --  ⌃  column-lock logic
-      ---------------------------------------------------------------------
-      local x = origin.x + dx
-      if self.onlyRightOf then
-        local isRight = origin.x > self.onlyRightOf
-                     or (origin.x == self.onlyRightOf and dx > 0)
-        if not isRight then goto continue end
-        if x <= self.onlyRightOf then x = self.onlyRightOf + 1 end
-      end
+    -- Apply column lock constraint (⌃ modifier)
+    if self.onlyRightOf then
+      local isRightOfColumn = curr.x > self.onlyRightOf or
+      (curr.x == self.onlyRightOf and dx > 0)
+      if not isRightOfColumn then goto continue end
 
-      ---------------------------------------------------------------------
-      --  Clamp to edges, maintain virtual position when outside
-      ---------------------------------------------------------------------
-      local outside = false
-      local minx    = -window:size().w
-      if     x > self.xmax - 1 then
-        outside = true; x = self.xmax - 1
-      elseif x < minx + 1 then
-        outside = true; x = minx + 1
-      end
-
-      if outside then
-        self.positions[id] = { x = origin.x + dx, y = origin.y }
-      else
-        self.positions[id] = nil
-      end
-
-      ---------------------------------------------------------------------
-      --  ⌥ → move cursor with the window
-      ---------------------------------------------------------------------
-      if self.onlyWindow then
-        local pos = hs.mouse.getRelativePosition()
-        pos.x = pos.x + x - window:topLeft().x
-        hs.mouse.setRelativePosition(pos)
-      end
-
-      ---------------------------------------------------------------------
-      --  Finally set the new window position
-      ---------------------------------------------------------------------
-      window:setTopLeft(x, origin.y)
+      newX = math.max(newX, self.onlyRightOf + 1)
     end
+
+    -- Calculate clamped position and track if window goes off-screen
+    local windowWidth = window:frame().w
+    local minX = self.xmin - windowWidth + 1
+    local maxX = self.xmax - 1
+    local clampedX = math.max(minX, math.min(newX, maxX))
+    local isOffScreen = clampedX ~= newX
+
+    -- Update virtual position tracking
+    if isOffScreen then
+      self.positions[id] = { x = newX, y = curr.y }
+    else
+      self.positions[id] = nil
+    end
+
+    -- Move cursor with window (⌥ modifier)
+    if self.onlyWindow then
+      local mousePos = hs.mouse.getRelativePosition()
+      mousePos.x = mousePos.x + clampedX - window:topLeft().x
+      hs.mouse.setRelativePosition(mousePos)
+    end
+
+    -- Apply the movement
+    window:setTopLeft(clampedX, curr.y)
+
     ::continue::
   end
 end
